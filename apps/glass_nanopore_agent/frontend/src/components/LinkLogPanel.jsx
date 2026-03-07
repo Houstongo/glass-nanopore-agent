@@ -25,7 +25,7 @@ const LinkLogPanel = ({ logs, emptyText = "等待链路数据..." }) => {
                         color: log.type === 'WARN' ? '#F59E0B' : log.type === 'ERROR' ? '#EF4444' : log.source === 'MCU' ? '#6366F1' : 'var(--text-main)',
                         fontWeight: log.source === 'MCU' ? 700 : 400
                     }}>
-                        {log.message}
+                        {typeof log.message === 'object' ? JSON.stringify(log.message) : String(log.message)}
                     </span>
                 </div>
             ))}

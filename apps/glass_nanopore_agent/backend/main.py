@@ -38,6 +38,7 @@ EXPERIMENT_DB_PATH = "D:/AntigravityProject/data/etching_experiments.sqlite"
 DEFAULT_BASE_URLS = {
     "ZhipuAI": "https://open.bigmodel.cn/api/paas/v4/",
     "DeepSeek": "https://api.deepseek.com",
+    "VolcEngine": "https://ark.cn-beijing.volces.com/api/v3",
     "Custom": "",
 }
 
@@ -47,6 +48,8 @@ def normalize_provider(provider: Optional[str]) -> str:
         "ZhipuAI": "ZhipuAI",
         "ZhipuAI (GLM-4)": "ZhipuAI",
         "DeepSeek": "DeepSeek",
+        "VolcEngine": "VolcEngine",
+        "火山方舟": "VolcEngine",
         "Custom": "Custom",
     }
     return mapping.get(provider or "ZhipuAI", provider or "ZhipuAI")
@@ -62,25 +65,41 @@ def load_local_config() -> Dict[str, Any]:
             data = {}
 
     provider = normalize_provider(data.get("llm_provider"))
-    selected_model = data.get("selected_model") or data.get("llm_model")
-    if not selected_model:
-        selected_model = "deepseek-chat" if provider == "DeepSeek" else "glm-4-flash"
+
+    # 各 provider 的专用 key（可独立配置，也可共用 api_key）
+    zhipu_key = data.get("zhipu_api_key", "")
+    deepseek_key = data.get("deepseek_api_key", "")
+    volc_key = data.get("volc_api_key", "") or data.get("api_key", "")
+
+    # 根据当前 provider 自动选择对应 api_key
+    provider_key_map = {
+        "ZhipuAI": zhipu_key,
+        "DeepSeek": deepseek_key,
+        "VolcEngine": volc_key,
+    }
+    api_key = data.get("api_key") or provider_key_map.get(provider, "")
+
+    # 默认模型名
+    default_model_map = {
+        "ZhipuAI": "glm-4-flash",
+        "DeepSeek": "deepseek-chat",
+        "VolcEngine": "",
+    }
+    selected_model = (
+        data.get("selected_model") or data.get("llm_model")
+        or default_model_map.get(provider, "")
+    )
 
     config = {
         "llm_provider": provider,
         "selected_model": selected_model,
-        "embed_model": data.get("embed_model", "embedding-3"),
+        "embed_model": data.get("embed_model", "local:BAAI/bge-large-zh-v1.5"),
         "base_url": data.get("base_url") or DEFAULT_BASE_URLS.get(provider, ""),
-        "api_key": data.get("api_key", ""),
-        "zhipu_api_key": data.get("zhipu_api_key", ""),
-        "deepseek_api_key": data.get("deepseek_api_key", ""),
+        "api_key": api_key,
+        "zhipu_api_key": zhipu_key,
+        "deepseek_api_key": deepseek_key,
+        "volc_api_key": volc_key,
     }
-
-    if not config["api_key"]:
-        if provider == "ZhipuAI":
-            config["api_key"] = config["zhipu_api_key"]
-        elif provider == "DeepSeek":
-            config["api_key"] = config["deepseek_api_key"]
 
     return config
 
@@ -135,6 +154,7 @@ def validate_config_credentials(config: Dict[str, Any]) -> Dict[str, Any]:
     embed_model = config.get("embed_model", "embedding-3")
     api_key = (config.get("api_key") or "").strip()
     base_url = config.get("base_url") or DEFAULT_BASE_URLS.get(provider, "")
+    # 智谱 embedding 可独立配置 key；其余 provider 复用主 api_key
     embedding_key = (config.get("zhipu_api_key") or api_key or "").strip()
 
     result = {
@@ -142,6 +162,7 @@ def validate_config_credentials(config: Dict[str, Any]) -> Dict[str, Any]:
         "embedding": {"ok": False, "message": ""},
     }
 
+    # ---------- LLM 验证 ----------
     if not api_key:
         result["llm"]["message"] = "缺少 LLM API Key"
     else:
@@ -156,9 +177,8 @@ def validate_config_credentials(config: Dict[str, Any]) -> Dict[str, Any]:
                     temperature=0,
                     max_tokens=8,
                 )
-                if not _chat_response_is_valid(chat_resp):
-                    raise RuntimeError("LLM 返回结构无效（empty choices）")
             else:
+                # VolcEngine / DeepSeek / Custom 均走 OpenAI 兼容接口
                 if OpenAIClient is None:
                     raise RuntimeError("openai SDK 未安装")
                 if not base_url:
@@ -170,20 +190,25 @@ def validate_config_credentials(config: Dict[str, Any]) -> Dict[str, Any]:
                     temperature=0,
                     max_tokens=8,
                 )
-                if not _chat_response_is_valid(chat_resp):
-                    raise RuntimeError("LLM 返回结构无效（empty choices）")
+            if not _chat_response_is_valid(chat_resp):
+                raise RuntimeError("LLM 返回结构无效（empty choices）")
             result["llm"]["ok"] = True
             result["llm"]["message"] = "LLM Key 验证通过"
         except Exception as exc:
             result["llm"]["message"] = f"LLM Key 验证失败: {_safe_error_text(exc)}"
 
-    if not embedding_key:
-        result["embedding"]["message"] = "缺少 Embedding API Key（Zhipu）"
+    # ---------- Embedding 验证 ----------
+    # embed_model="local:xxx" 时跳过 API 验证，本地模型无需 key
+    if embed_model.startswith("local:"):
+        result["embedding"]["ok"] = True
+        result["embedding"]["message"] = f"本地 Embedding 模型：{embed_model[6:]}"
+    elif not embedding_key:
+        result["embedding"]["message"] = "缺少 Embedding API Key"
     else:
         try:
-            if ZhipuClient is None:
-                raise RuntimeError("zhipuai SDK 未安装")
-            embed_client = ZhipuClient(api_key=embedding_key)
+            if OpenAIClient is None:
+                raise RuntimeError("openai SDK 未安装")
+            embed_client = OpenAIClient(api_key=embedding_key, base_url=base_url)
             embed_resp = embed_client.embeddings.create(model=embed_model, input="ping")
             if not _embedding_response_is_valid(embed_resp):
                 raise RuntimeError("Embedding 返回结构无效（empty vector）")
@@ -293,8 +318,8 @@ app.add_middleware(
 if os.path.isdir(SEM_IMAGES_DIR):
     app.mount("/data/sem_images", StaticFiles(directory=SEM_IMAGES_DIR), name="sem-images")
 
-if os.path.isdir(CVDATA_DIR):
-    app.mount("/cvdata", StaticFiles(directory=CVDATA_DIR), name="cvdata")
+if os.path.isdir("D:/LabOSData"):
+    app.mount("/cvdata", StaticFiles(directory="D:/LabOSData"), name="cvdata")
 
 # --- 全局状态 ---
 rag_engine: Optional[NanoporeRAGEngine] = None
@@ -323,10 +348,11 @@ class ConfigInitRequest(BaseModel):
     llm_provider: str = "ZhipuAI"
     llm_model: Optional[str] = None
     selected_model: Optional[str] = None
-    embed_model: str = "embedding-3"
+    embed_model: str = "local:BAAI/bge-large-zh-v1.5"
     base_url: Optional[str] = None
     zhipu_api_key: Optional[str] = None
     deepseek_api_key: Optional[str] = None
+    volc_api_key: Optional[str] = None
 
 
 class ConnectBridgeRequest(BaseModel):
@@ -398,6 +424,7 @@ async def get_config():
         "api_key": config.get("api_key", ""),
         "zhipu_api_key": config.get("zhipu_api_key", ""),
         "deepseek_api_key": config.get("deepseek_api_key", ""),
+        "volc_api_key": config.get("volc_api_key", ""),
         "llm_provider": config.get("llm_provider"),
         "selected_model": config.get("selected_model"),
         "llm_model": config.get("selected_model"),
@@ -406,6 +433,50 @@ async def get_config():
         "is_initialized": rag_engine is not None,
     }
 
+@app.post("/api/config/validate")
+async def validate_config_only(req: ConfigInitRequest):
+    """仅验证凭据，不保存配置、不重建 RAG 引擎。"""
+    config = load_local_config()
+    provider = normalize_provider(req.llm_provider)
+    selected_model = req.selected_model or req.llm_model or config.get("selected_model") or "glm-4-flash"
+
+    zhipu_key = req.zhipu_api_key if req.zhipu_api_key is not None else config.get("zhipu_api_key", "")
+    deepseek_key = req.deepseek_api_key if req.deepseek_api_key is not None else config.get("deepseek_api_key", "")
+    volc_key = req.volc_api_key if req.volc_api_key is not None else config.get("volc_api_key", "")
+
+    if req.api_key:
+        if provider == "ZhipuAI":
+            zhipu_key = req.api_key
+        elif provider == "DeepSeek":
+            deepseek_key = req.api_key
+        elif provider == "VolcEngine":
+            volc_key = req.api_key
+
+    active_key_map = {"ZhipuAI": zhipu_key, "DeepSeek": deepseek_key, "VolcEngine": volc_key}
+    active_key = req.api_key or active_key_map.get(provider, "")
+    if not active_key:
+        raise HTTPException(status_code=400, detail="缺少可用的 API Key")
+
+    test_config = dict(config)
+    test_config.update({
+        "api_key": active_key,
+        "llm_provider": provider,
+        "selected_model": selected_model,
+        "base_url": req.base_url if req.base_url is not None else DEFAULT_BASE_URLS.get(provider, ""),
+        "zhipu_api_key": zhipu_key,
+        "deepseek_api_key": deepseek_key,
+        "volc_api_key": volc_key,
+    })
+
+    validation = validate_config_credentials(test_config)
+    return {
+        "ok": validation["llm"]["ok"],
+        "llm_provider": provider,
+        "selected_model": selected_model,
+        "validation": validation,
+    }
+
+
 @app.post("/api/config/init")
 async def init_config(req: ConfigInitRequest):
     global rag_engine
@@ -413,16 +484,23 @@ async def init_config(req: ConfigInitRequest):
     provider = normalize_provider(req.llm_provider)
     selected_model = req.selected_model or req.llm_model or config.get("selected_model") or "glm-4-flash"
 
+    # 各 provider key：请求中有值则用请求值，否则保留已存储的值
     zhipu_key = req.zhipu_api_key if req.zhipu_api_key is not None else config.get("zhipu_api_key", "")
     deepseek_key = req.deepseek_api_key if req.deepseek_api_key is not None else config.get("deepseek_api_key", "")
+    volc_key = req.volc_api_key if req.volc_api_key is not None else config.get("volc_api_key", "")
 
+    # 兼容：api_key 字段直接写入对应 provider 的专用 key
     if req.api_key:
         if provider == "ZhipuAI":
             zhipu_key = req.api_key
         elif provider == "DeepSeek":
             deepseek_key = req.api_key
+        elif provider == "VolcEngine":
+            volc_key = req.api_key
 
-    active_key = req.api_key or (zhipu_key if provider == "ZhipuAI" else deepseek_key)
+    # 当前激活的 key
+    active_key_map = {"ZhipuAI": zhipu_key, "DeepSeek": deepseek_key, "VolcEngine": volc_key}
+    active_key = req.api_key or active_key_map.get(provider, "")
     if not active_key:
         raise HTTPException(status_code=400, detail="缺少可用的 API Key")
 
@@ -437,6 +515,7 @@ async def init_config(req: ConfigInitRequest):
             "base_url": req.base_url if req.base_url is not None else DEFAULT_BASE_URLS.get(provider, ""),
             "zhipu_api_key": zhipu_key,
             "deepseek_api_key": deepseek_key,
+            "volc_api_key": volc_key,
         }
     )
 
@@ -641,17 +720,32 @@ async def get_database_experiments(
     cursor.execute("SELECT COUNT(*) FROM experiments")
     total_count = cursor.fetchone()[0]
     
-    # 仅允许白名单字段参与排序，避免 SQL 注入和非法列名
+    # 扩展排序白名单，支持前端点击的所有主要列
     sortable_fields = {
         "id",
         "dataset_id",
         "stage_name",
         "group_name",
         "group_index",
+        "run_label",
         "sample_count",
         "status",
+        "quality_score",
+        "actual_angle_deg",
+        "positive_voltage_v"
     }
     safe_sort_by = sort_by if sort_by in sortable_fields else "id"
+    # 如果排序字段属于子表，需要调整排序前缀，这里通过 COALESCE 简化处理
+    sort_prefix = ""
+    if safe_sort_by == "quality_score":
+        sort_prefix = "m."
+    elif safe_sort_by == "positive_voltage_v":
+        sort_prefix = "p."
+    elif safe_sort_by == "actual_angle_deg":
+        sort_prefix = "m."
+    else:
+        sort_prefix = "e."
+
     safe_order = "ASC" if order.lower() == "asc" else "DESC"
 
     # 查询详细数据并关联参数、测量和图片
@@ -661,16 +755,25 @@ async def get_database_experiments(
             p.positive_voltage_v, 
             p.negative_voltage_v, 
             p.frequency_hz,
+            p.immersion_depth_um,
+            p.solution_concentration,
+            p.etching_time_s,
+            p.tip_diameter_um,
+            p.capillary_diameter_um,
+            p.heating_count,
             m.target_cone_angle_deg AS target_angle_deg, 
             m.cone_angle_deg AS actual_angle_deg, 
             m.angle_diff_deg,
             m.quality_score,
+            m.symmetry_score,
+            m.roughness,
+            m.stability,
             i.image_path as main_image 
         FROM experiments e
         LEFT JOIN experiment_parameters p ON e.id = p.experiment_id
         LEFT JOIN experiment_measurements m ON e.id = m.experiment_id
-        LEFT JOIN experiment_images i ON e.id = i.experiment_id AND i.image_index = 0
-        ORDER BY e.{safe_sort_by} {safe_order}
+        LEFT JOIN experiment_images i ON e.id = i.experiment_id AND (i.image_index = 1 OR i.id = (SELECT MIN(id) FROM experiment_images WHERE experiment_id = e.id))
+        ORDER BY {sort_prefix}{safe_sort_by} {safe_order}
         LIMIT ? OFFSET ?
     """
     cursor.execute(query, (page_size, offset))
@@ -678,22 +781,36 @@ async def get_database_experiments(
     
     # 转换路径为 URL 并处理空值
     for row in rows:
+        # 补齐关键数值字段默认值，防止前端报错
+        numeric_fields = [
+            "positive_voltage_v", "negative_voltage_v", "frequency_hz", 
+            "immersion_depth_um", "solution_concentration", "etching_time_s",
+            "actual_angle_deg", "target_angle_deg", "quality_score", "symmetry_score"
+        ]
+        for field in numeric_fields:
+            row[field] = row.get(field) if row.get(field) is not None else 0.0
         if row.get("main_image"):
             try:
-                rel_path = os.path.relpath(row["main_image"], CVDATA_DIR).replace("\\", "/")
-                row["main_image_url"] = None if rel_path.startswith("..") else f"/cvdata/{rel_path}"
-            except ValueError:
+                # 兼容处理路径分隔符和大小写
+                main_img_path = row["main_image"]
+                # 统一使用 D:/LabOSData 作为静态资源根路径
+                try:
+                    rel_path = os.path.relpath(main_img_path, "D:/LabOSData").replace("\\", "/")
+                    row["main_image_url"] = f"/cvdata/{rel_path}" if not rel_path.startswith("..") else None
+                except Exception:
+                    row["main_image_url"] = None
+            except Exception:
                 row["main_image_url"] = None
         else:
             row["main_image_url"] = None
             
         # 确保关键数值字段不为 None，方便前端展示
-        row["positive_voltage_v"] = row.get("positive_voltage_v") or 0.0
-        row["negative_voltage_v"] = row.get("negative_voltage_v") or 0.0
-        row["frequency_hz"] = row.get("frequency_hz") or 0
-        row["actual_angle_deg"] = row.get("actual_angle_deg") or 0.0
-        row["target_angle_deg"] = row.get("target_angle_deg") or 0.0
-        row["quality_score"] = row.get("quality_score") or 0.0
+        row["positive_voltage_v"] = row.get("positive_voltage_v") if row.get("positive_voltage_v") is not None else 0.0
+        row["negative_voltage_v"] = row.get("negative_voltage_v") if row.get("negative_voltage_v") is not None else 0.0
+        row["frequency_hz"] = row.get("frequency_hz") if row.get("frequency_hz") is not None else 0
+        row["actual_angle_deg"] = row.get("actual_angle_deg") if row.get("actual_angle_deg") is not None else 0.0
+        row["target_angle_deg"] = row.get("target_angle_deg") if row.get("target_angle_deg") is not None else 0.0
+        row["quality_score"] = row.get("quality_score") if row.get("quality_score") is not None else 0.0
     
     conn.close()
     return {
@@ -705,4 +822,4 @@ async def get_database_experiments(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run("backend.main:app", host="127.0.0.1", port=8000, reload=True, reload_dirs=["backend", "core"])

@@ -1,0 +1,10 @@
+{
+  "llm_provider": "VolcEngine",
+  "selected_model": "ep-20260308033825-46h9r",
+  "embed_model": "local:BAAI/bge-large-zh-v1.5",
+  "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+  "api_key": "0649ae43-c50a-45c1-9cce-8848c5401d8c",
+  "zhipu_api_key": "37b04c1d931b4ae8b8e8a04da8127e66.nixWPPYNKwW4FHHM",
+  "deepseek_api_key": "sk-9641bf81cb59460ebfce25718caa7109",
+  "volc_api_key": "0649ae43-c50a-45c1-9cce-8848c5401d8c"
+}

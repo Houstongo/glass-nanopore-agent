@@ -1,0 +1,51 @@
+{
+  "experiments": [
+    "id",
+    "dataset_id",
+    "stage_name",
+    "group_name",
+    "group_index",
+    "run_label",
+    "sample_count",
+    "status",
+    "notes"
+  ],
+  "experiment_parameters": [
+    "id",
+    "experiment_id",
+    "positive_voltage_v",
+    "negative_voltage_v",
+    "frequency_hz",
+    "immersion_depth_um",
+    "tip_diameter_um",
+    "capillary_diameter_um",
+    "heating_count",
+    "parameter_json"
+  ],
+  "experiment_measurements": [
+    "id",
+    "experiment_id",
+    "cone_angle_deg",
+    "target_cone_angle_deg",
+    "angle_diff_deg",
+    "stability",
+    "angle_variance",
+    "roughness",
+    "symmetry_score",
+    "quality_score",
+    "measurement_json"
+  ],
+  "experiment_images": [
+    "id",
+    "experiment_id",
+    "image_path",
+    "image_name",
+    "image_index",
+    "image_role",
+    "capture_stage",
+    "measured_cone_angle_deg",
+    "measured_angle_diff_deg",
+    "thumbnail_path",
+    "metadata_json"
+  ]
+}

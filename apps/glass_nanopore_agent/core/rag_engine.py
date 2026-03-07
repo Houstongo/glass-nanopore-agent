@@ -2,7 +2,10 @@
 import sqlite3
 from typing import Any, Dict, List, Optional
 
-from zhipuai import ZhipuAI
+try:
+    from zhipuai import ZhipuAI
+except Exception:
+    ZhipuAI = None
 
 try:
     from openai import OpenAI
@@ -30,11 +33,14 @@ def get_global_engine():
     return _global_engine
 
 
-class ZhipuAIEmbeddingsWrapper(Embeddings):
-    """Minimal LangChain embedding adapter backed by Zhipu embeddings."""
 
-    def __init__(self, api_key: str, model: str = "embedding-3"):
-        self.client = ZhipuAI(api_key=api_key)
+class OpenAICompatibleEmbeddingsWrapper(Embeddings):
+    """LangChain Embedding 适配器，使用任意 OpenAI 兼容接口（火山方舟/DeepSeek 等）。"""
+
+    def __init__(self, api_key: str, model: str, base_url: str):
+        if OpenAI is None:
+            raise RuntimeError("openai SDK 未安装")
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
@@ -50,6 +56,36 @@ class ZhipuAIEmbeddingsWrapper(Embeddings):
     def embed_query(self, text: str) -> List[float]:
         resp = self.client.embeddings.create(model=self.model, input=text)
         return resp.data[0].embedding
+
+
+class LocalBGEEmbeddingsWrapper(Embeddings):
+    """本地 BGE 系列 Embedding 模型适配器（基于 sentence-transformers，无需 API）。
+
+    默认使用 BAAI/bge-large-zh-v1.5，支持后续微调替换。
+    模型首次使用时自动从 HuggingFace 下载，缓存到本地。
+    """
+
+    def __init__(self, model_name: str = "BAAI/bge-large-zh-v1.5"):
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
+            raise RuntimeError("sentence-transformers 未安装，请执行：pip install sentence-transformers")
+        # 加载模型，device=cpu 保持跨机器兼容性
+        self.model = SentenceTransformer(model_name, device="cpu")
+        self.model_name = model_name
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        # 过滤空文本，批量 encode 提升效率
+        clean_texts = [(t or "").strip() for t in texts]
+        clean_texts = [t if t else " " for t in clean_texts]
+        vectors = self.model.encode(clean_texts, normalize_embeddings=True)
+        return [v.tolist() for v in vectors]
+
+    def embed_query(self, text: str) -> List[float]:
+        # BGE 模型查询侧需添加 instruction 前缀以提升检索质量
+        query_with_instruction = f"为这个句子生成表示以用于检索相关文章：{text}"
+        vector = self.model.encode(query_with_instruction, normalize_embeddings=True)
+        return vector.tolist()
 
 
 class NanoporeRAGEngine:
@@ -78,17 +114,19 @@ class NanoporeRAGEngine:
 
         os.makedirs(self.persist_directory, exist_ok=True)
 
-        # LLM client selection
-        self.client_zhipu = ZhipuAI(api_key=api_key)
-        self.client_openai = None
-        if OpenAI and base_url:
-            self.client_openai = OpenAI(api_key=api_key, base_url=base_url)
-
-        if llm_provider == "ZhipuAI" or not self.client_openai:
-            self.llm_client = self.client_zhipu
+        # 根据 provider 选择 LLM client
+        if llm_provider == "ZhipuAI":
+            if ZhipuAI is None:
+                raise RuntimeError("zhipuai SDK 未安装")
+            self.llm_client = ZhipuAI(api_key=api_key)
             self.llm_mode = "zhipu"
         else:
-            self.llm_client = self.client_openai
+            # 火山方舟 / DeepSeek / Custom 均走 OpenAI 兼容接口
+            if OpenAI is None:
+                raise RuntimeError("openai SDK 未安装")
+            if not base_url:
+                raise ValueError(f"provider={llm_provider} 需要提供 base_url")
+            self.llm_client = OpenAI(api_key=api_key, base_url=base_url)
             self.llm_mode = "openai"
 
         # 向量数据库路径分离
@@ -97,8 +135,19 @@ class NanoporeRAGEngine:
         os.makedirs(self.core_dir, exist_ok=True)
         os.makedirs(self.macro_dir, exist_ok=True)
 
-        # 向量模型
-        self.embeddings = ZhipuAIEmbeddingsWrapper(api_key=self.embedding_key, model=self.embed_model)
+        # 根据 embed_model 选择 Embedding 实现
+        # "local:xxx" → 本地 BGE 模型
+        # 其他 → OpenAI 兼容接口（需要 base_url）
+        if self.embed_model.startswith("local:"):
+            local_model_name = self.embed_model[len("local:"):]
+            self.embeddings = LocalBGEEmbeddingsWrapper(model_name=local_model_name)
+        else:
+            embed_base_url = base_url or ""
+            self.embeddings = OpenAICompatibleEmbeddingsWrapper(
+                api_key=self.embedding_key,
+                model=self.embed_model,
+                base_url=embed_base_url,
+            )
         
         # 1. 核心库 (Core Knowledge) - 实验参数、严谨工艺
         self.core_store = Chroma(
