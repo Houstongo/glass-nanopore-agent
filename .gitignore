@@ -1,0 +1,39 @@
+# OS and editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Frontend
+node_modules/
+.vite/
+dist/
+
+# Firmware build artifacts
+cmake-build-*/
+build/
+Debug/
+Release/
+
+# Local archives and recovery snapshots
+archive/
+
+# Large data artifacts
+*.sqlite
+*.sqlite-journal
+*.db
+*.pdf
+
+# Logs and temp files
+*.log
+*.tmp
+*.bak
