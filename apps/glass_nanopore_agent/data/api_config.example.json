@@ -1,0 +1,10 @@
+{
+  "llm_provider": "VolcEngine",
+  "selected_model": "",
+  "embed_model": "local:BAAI/bge-large-zh-v1.5",
+  "base_url": "",
+  "api_key": "",
+  "zhipu_api_key": "",
+  "deepseek_api_key": "",
+  "volc_api_key": ""
+}
