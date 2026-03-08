@@ -732,17 +732,16 @@ async def get_database_experiments(
         "status",
         "quality_score",
         "actual_angle_deg",
-        "positive_voltage_v"
+        "positive_voltage_v",
+        "stability"
     }
     safe_sort_by = sort_by if sort_by in sortable_fields else "id"
-    # 如果排序字段属于子表，需要调整排序前缀，这里通过 COALESCE 简化处理
+    # 如果排序字段属于子表，需要调整排序前缀
     sort_prefix = ""
-    if safe_sort_by == "quality_score":
+    if safe_sort_by in ["quality_score", "actual_angle_deg", "stability", "roughness", "symmetry_score"]:
         sort_prefix = "m."
-    elif safe_sort_by == "positive_voltage_v":
+    elif safe_sort_by in ["positive_voltage_v", "negative_voltage_v", "frequency_hz", "immersion_depth_um"]:
         sort_prefix = "p."
-    elif safe_sort_by == "actual_angle_deg":
-        sort_prefix = "m."
     else:
         sort_prefix = "e."
 
@@ -761,6 +760,7 @@ async def get_database_experiments(
             p.tip_diameter_um,
             p.capillary_diameter_um,
             p.heating_count,
+            p.parameter_json,
             m.target_cone_angle_deg AS target_angle_deg, 
             m.cone_angle_deg AS actual_angle_deg, 
             m.angle_diff_deg,
@@ -768,6 +768,7 @@ async def get_database_experiments(
             m.symmetry_score,
             m.roughness,
             m.stability,
+            m.measurement_json,
             i.image_path as main_image 
         FROM experiments e
         LEFT JOIN experiment_parameters p ON e.id = p.experiment_id
@@ -779,41 +780,59 @@ async def get_database_experiments(
     cursor.execute(query, (page_size, offset))
     rows = [dict(row) for row in cursor.fetchall()]
     
-    # 转换路径为 URL 并处理空值
+    # 转换路径为 URL 并处理空值与 JSON 备选数据
     for row in rows:
-        # 补齐关键数值字段默认值，防止前端报错
+        # 尝试从 JSON 字段解析备选数据
+        try:
+            p_json = json.loads(row.get("parameter_json")) if row.get("parameter_json") else {}
+        except:
+            p_json = {}
+        try:
+            m_json = json.loads(row.get("measurement_json")) if row.get("measurement_json") else {}
+        except:
+            m_json = {}
+
+        # 补齐关键数值字段
         numeric_fields = [
             "positive_voltage_v", "negative_voltage_v", "frequency_hz", 
             "immersion_depth_um", "solution_concentration", "etching_time_s",
             "actual_angle_deg", "target_angle_deg", "quality_score", "symmetry_score"
         ]
         for field in numeric_fields:
-            row[field] = row.get(field) if row.get(field) is not None else 0.0
-        if row.get("main_image"):
-            try:
-                # 兼容处理路径分隔符和大小写
-                main_img_path = row["main_image"]
-                # 统一使用 D:/LabOSData 作为静态资源根路径
+            val = row.get(field)
+            # 如果列值为空，尝试从 p_json 或 m_json 获取
+            if val is None or val == "":
+                val = p_json.get(field) if field in p_json else m_json.get(field)
+            
+            if val is None or val == "":
+                row[field] = 0.0
+            else:
                 try:
-                    rel_path = os.path.relpath(main_img_path, "D:/LabOSData").replace("\\", "/")
-                    row["main_image_url"] = f"/cvdata/{rel_path}" if not rel_path.startswith("..") else None
-                except Exception:
+                    row[field] = float(val)
+                except (ValueError, TypeError):
+                    row[field] = 0.0
+
+        # 处理 SEM 图像 URL
+        image_val = row.get("main_image")
+        if image_val:
+            try:
+                # 统一路径处理：支持 Windows 绝对路径映射到 /cvdata/
+                path_str = str(image_val).replace("\\", "/")
+                # 寻找 LabOSData 标志位，直接进行相对路径提取
+                search_key = "LabOSData/"
+                if search_key in path_str:
+                    rel_path = path_str.split(search_key)[1]
+                    row["main_image_url"] = f"/cvdata/{rel_path}"
+                else:
                     row["main_image_url"] = None
             except Exception:
                 row["main_image_url"] = None
         else:
             row["main_image_url"] = None
-            
-        # 确保关键数值字段不为 None，方便前端展示
-        row["positive_voltage_v"] = row.get("positive_voltage_v") if row.get("positive_voltage_v") is not None else 0.0
-        row["negative_voltage_v"] = row.get("negative_voltage_v") if row.get("negative_voltage_v") is not None else 0.0
-        row["frequency_hz"] = row.get("frequency_hz") if row.get("frequency_hz") is not None else 0
-        row["actual_angle_deg"] = row.get("actual_angle_deg") if row.get("actual_angle_deg") is not None else 0.0
-        row["target_angle_deg"] = row.get("target_angle_deg") if row.get("target_angle_deg") is not None else 0.0
-        row["quality_score"] = row.get("quality_score") if row.get("quality_score") is not None else 0.0
     
     conn.close()
     return {
+        "API_VERSION": "REALLY_THE_NEW_CODE_002",
         "data": rows,
         "total": total_count,
         "page": page,
@@ -822,4 +841,8 @@ async def get_database_experiments(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("backend.main:app", host="127.0.0.1", port=8000, reload=True, reload_dirs=["backend", "core"])
+    # 确保当前目录在 sys.path 中，以便 uvicorn 找到 main:app
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    if current_dir not in sys.path:
+        sys.path.insert(0, current_dir)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True, reload_dirs=[current_dir])

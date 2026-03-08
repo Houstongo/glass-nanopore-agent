@@ -38,6 +38,8 @@ archive/
 *.log
 *.tmp
 *.bak
+tmp/
+apps/glass_nanopore_agent/backend/tmp_api_res.json
 
 # Local app secrets
 apps/glass_nanopore_agent/data/api_config.json
