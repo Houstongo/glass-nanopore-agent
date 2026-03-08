@@ -40,6 +40,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+// ADC2 流式采样按 20 个点组成一包，由主循环统一通过 USART3 发送。
+#define ADC2_STREAM_SAMPLE_COUNT 20U
+#define ADC2_STREAM_READY_NONE 0xFFU
 uint32_t Pulse_Cnt_Tim3=0;
 uint32_t Pluse_Tim2_one = 20;//旋转一个脉冲的时间 ms
 uint32_t Pulse_Cnt3 = 0;
@@ -62,6 +65,13 @@ uint16_t Tim3Flags = 0;
 uint16_t Tim2Flags = 0;
 uint16_t light = 0;
 uint16_t a = 0;
+// 双缓冲避免主循环发送时覆盖正在采样的数据。
+uint16_t adc2_stream_buffers[2][ADC2_STREAM_SAMPLE_COUNT] = {{0}};
+volatile uint8_t adc2_stream_ready_buffer = ADC2_STREAM_READY_NONE;
+volatile uint8_t adc2_stream_write_buffer = 0;
+volatile uint8_t adc2_stream_index = 0;
+volatile uint32_t adc2_packet_seq = 0;
+volatile uint32_t adc2_stream_drop_count = 0;
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -80,6 +90,7 @@ uint16_t a = 0;
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 uint32_t CalPulseTime(uint32_t distance);
+static void SendAdc2Chunk(uint8_t buffer_index);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -122,6 +133,9 @@ int main(void)
   MX_ADC2_Init();
   MX_USART1_UART_Init();
   MX_TIM2_Init();
+  // USART3 连接 ESP，无线协议转换放在 ESP 侧处理。
+  MX_USART3_UART_Init();
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
 
 // open the light 开灯
@@ -141,6 +155,8 @@ HAL_UART_Transmit(&huart1, (uint8_t *)"Hello World!\r\n", 14, 1000);
 
 	HAL_ADCEx_Calibration_Start(&hadc2);
 	HAL_ADC_Start_IT(&hadc2);
+	// 启动 TIM4 的 100Hz 采样节拍，为 ADC2 生成稳定时间轴。
+	HAL_TIM_Base_Start_IT(&htim4);
 	// 上拉第一个继电器(接ADC) 下拉第二个继电器(断电)
 	HAL_GPIO_WritePin(LK1_NEG_GPIO_Port, LK1_NEG_Pin, GPIO_PIN_SET);
 	HAL_GPIO_WritePin(LK1_POS_GPIO_Port, LK1_POS_Pin, GPIO_PIN_RESET);
@@ -164,6 +180,12 @@ HAL_UART_Transmit(&huart1, (uint8_t *)"Hello World!\r\n", 14, 1000);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	// 只在主循环里发送整包数据，避免在中断里阻塞串口。
+	if (adc2_stream_ready_buffer != ADC2_STREAM_READY_NONE) {
+		uint8_t ready_buffer = adc2_stream_ready_buffer;
+		SendAdc2Chunk(ready_buffer);
+		adc2_stream_ready_buffer = ADC2_STREAM_READY_NONE;
+	}
 //		printf("page1.n3.val=%d\xff\xff\xff",HAL_ADC_GetValue(&hadc2));
 //		printf("page1.n4.val=%d\xff\xff\xff",isPowered);
 //		HAL_Delay(500);
@@ -369,6 +391,23 @@ uint32_t CalPulseTime(uint32_t distance)
  return pwm_time;
 }	
 
+
+// 第一版先发文本包，便于 ESP 和上位机快速联调，后续可切换成二进制协议。
+static void SendAdc2Chunk(uint8_t buffer_index)
+{
+	char msg[192];
+	int len = snprintf(msg, sizeof(msg), "ADC2,%lu,%lu,%u", adc2_packet_seq++, adc2_stream_drop_count, ADC2_STREAM_SAMPLE_COUNT);
+
+	for (uint8_t i = 0; i < ADC2_STREAM_SAMPLE_COUNT && len > 0 && len < (int)sizeof(msg); ++i) {
+		len += snprintf(&msg[len], sizeof(msg) - (size_t)len, ",%u", adc2_stream_buffers[buffer_index][i]);
+	}
+
+	if (len > 0 && len < (int)(sizeof(msg) - 2U)) {
+		msg[len++] = '\r';
+		msg[len++] = '\n';
+		HAL_UART_Transmit(&huart3, (uint8_t *)msg, (uint16_t)len, 1000);
+	}
+}
 
 int fputc(int ch, FILE *f)
 {
